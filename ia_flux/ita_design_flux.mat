@@ -1,0 +1,115 @@
+%% Analysis of itaconate yield on glucose using different design options
+% Updated compartment names with full keyword in new model
+
+clearvars
+% model obtained from paper: https://bmcsystbiol.biomedcentral.com/articles/10.1186/1752-0509-4-178
+% model can be downloaded from here: https://static-content.springer.com/esm/art%3A10.1186%2F1752-0509-4-178/MediaObjects/12918_2010_589_MOESM3_ESM.XML
+
+% model = readCbModel('12918_2010_589_MOESM3_ESM',[],'SBML');
+% save('iMM904_GM','model');
+load iMM904_GM
+model = addReaction(model,'ACDH','acald_c[Cytosol] + coa_c[Cytosol] + nad_c[Cytosol] 	<=>	accoa_c[Cytosol] + h_c[Cytosol] + nadh_c[Cytosol]');
+model = addReaction(model,'CSc','accoa_c[Cytosol] + h2o_c[Cytosol] + oaa_c[Cytosol] 	<=>	cit_c[Cytosol] + coa_c[Cytosol] + h_c[Cytosol]');
+model = addReaction(model,'ACOc','cit_c[Cytosol] 	<=>	h2o_c[Cytosol] + aco[Cytosol]');
+model = addReaction(model,'CADc','h_c[Cytosol] + aco[Cytosol] 	<=>	co2_c[Cytosol] + itacon[Cytosol]');
+model = addReaction(model,'ITAt2r','h_e[Extra_organism] + itacon[Extra_organism] 	<=>	h_c[Cytosol] + itacon[Cytosol]');
+model = addReaction(model,'EX_ita(e)','itacon[Extra_organism] 	<=>');
+model.metFormulas( findMetIDs(model,{'itacon[Cytosol]','aco[Cytosol]'})) = {'C5H4O4';'C6H3O6'};
+model.lb = lb;
+model.ub = ub;
+model = changeRxnBounds(model,'EX_glc(e)',-1,'l'); % Set glc uptake rate
+
+% Set reaction bounds
+model = changeRxnBounds(model,'PPCK',0,'l');
+model = changeRxnBounds(model,'CSc',0,'b');
+model = changeRxnBounds(model, {'CYSTL';'SERD_L'}, 0, 'u');    %block ser->pyr  (this one bypass lower glycolysis)
+model = changeRxnBounds(model, 'PRPPS', 0, 'l');        %cutoff this to prevent amp->atp
+model = changeRxnBounds(model,'ACDH',0,'b');
+
+model = changeRxnBounds(model, 'ATPM',2,'l');       %Set minimal maintenance due to process
+model = changeRxnBounds(model,'biomass_wild',0.01,'l');
+% Clean up all previously set objectives and set biomass as the only
+% objective in the model.
+model.c(model.c~=0)=0;
+model = changeObjective(model,'biomass_wild',1);
+solRef = optimizeCbModel(model,'max','one');
+
+%% Option 2 ACDH pathway
+% Now set the product as the only objective
+model = changeRxnBounds(model,'CSc',1e3,'u');
+model = changeObjective(model,'EX_ita(e)',1);
+model = changeRxnBounds(model,'ACDH',1e3,'u');
+solOpt = optimizeCbModel(model, 'max', 'one');
+
+yOpt = solOpt.x(findRxnIDs(model,{'EX_glc(e)';'EX_ita(e)'}));
+yOpt(3) = yOpt(2)/yOpt(1)*-1;
+
+%% Option 3 PK pathway
+% Calculate the phosphoketolase option:
+model = changeRxnBounds(model,'ACDH',0,'b');        % Shutdown ACDH
+
+% Add additional reactions to model:
+model = addReaction(model,'PK','xu5p_D_c[Cytosol] + pi_c[Cytosol] <=> g3p_c[Cytosol] + actp[Cytosol] + h2o_c[Cytosol]'); % phosphoketolase
+model = addReaction(model,'PTA','actp[Cytosol] + coa_c[Cytosol] <=> accoa_c[Cytosol] + pi_c[Cytosol]'); % PTA
+model.metFormulas{findMetIDs(model,'actp[Cytosol]')} = 'C2H3O5P';
+model = changeRxnBounds(model,{'PK','PTA'},1e3,'u');
+
+solPK = optimizeCbModel(model, 'max', 'one');
+yPK = solPK.x(findRxnIDs(model,{'EX_glc(e)';'EX_ita(e)'}));
+yPK(3) = yPK(2)/yPK(1)*-1;
+yPK(4) = solPK.x(findRxnIDs(model,{'PK'}));
+[a,b,c] = ListReaction4Metv2('cit_c[Cytosol]',model,solPK.x,[1e-3,999]);
+
+%% Option 4 ACK pathway:
+model = changeRxnBounds(model,{'PK'},0,'b');      % Remove PK, PTA to keep only ACK
+% model = changeRxnBounds(model,{'PK','CSc','ACDH'},0,'b');           % PK is preferred under no ATPM
+model = addReaction(model,'ACK','ac_c[Cytosol] + atp_c[Cytosol] => actp[Cytosol] + adp_c[Cytosol]');   % acetate kinase
+% model = changeRxnBounds(model,{'CITtam';'CITtbm'},0,'l');          % The next preference is get cit via mitochondria.
+% model = changeRxnBounds(model,{'ACS','ACSp','ACSm'},0,'b');         % ACK option is not viable. But cut off PK+CSc+ACDH gives ACK a small advantange
+% model = changeRxnBounds(model,'ACK',1e3,'u');
+% model.c(findRxnIDs(model,'PYRDC')) = 0.1;
+solACK = optimizeCbModel(model, 'max', 'one');
+% model.c(findRxnIDs(model,'PYRDC')) = 0;
+yACK = solACK.x(findRxnIDs(model,{'EX_glc(e)';'EX_ita(e)'}));
+yACK(3) = yACK(2)/yACK(1)*-1;
+yACK(4) = solACK.x(findRxnIDs(model,{'ACK'}));
+
+%% Option 1 mito pathway:
+% model = changeRxnBounds(model,{'ACK','CSc','ACDH','ACS'},0,'b');
+model = changeRxnBounds(model,{'PK','CSc','ACDH'},0,'b');           % PK is preferred under no ATPM
+model = changeRxnBounds(model,'ACK',0,'b');
+model.c(findRxnIDs(model,'PK')) = 0;
+solM = optimizeCbModel(model, 'max', 'one');
+yM   = solM.x(findRxnIDs(model,{'EX_glc(e)';'EX_ita(e)'}));
+yM(3)= yM(2)/yM(1)*-1;
+
+%% Mix of all options:
+model   = changeRxnBounds(model,{'ACK','CSc','ACDH','PK','ACS'},1e3,'u');
+solOpt2 = optimizeCbModel(model, 'max', 'one');
+yOpt2   = solOpt2.x(findRxnIDs(model,{'EX_glc(e)';'EX_ita(e)'}));
+yOpt2(3)= yOpt2(2)/yOpt2(1)*-1;
+
+% Clean up numerical noise
+solRef.x(abs(solRef.x)<1e-9)=0;
+solOpt.x(abs(solOpt.x)<1e-9)=0;
+solPK.x(abs(solOpt.x)<1e-9)=0;
+solOpt2.x(abs(solOpt.x)<1e-9)=0;
+solM.x(abs(solOpt.x)<1e-9)=0;
+solACK.x(abs(solOpt.x)<1e-9)=0;
+%% Summarize yield
+% Y = [yM(2) yOpt(2) yPK(2) yACK(2) yOpt2(2)];
+
+Y_atpm0 = [1.05036937542006,1.05389221556997,1.20000000000044,1.05919494869789,1.19999999999969];
+Y_atpm2 = [1.01813297515133,1.02195608782455,1.07563025210109,1.02131018153086,1.08527131783002];
+Y_atpm4 = [0.936936936938009,0.955752212390256,0.936936936937360,0.936936936936756,0.955752212389479];
+Y_a2g1  = [0.927200983262034,0.931201804390782,0.932620023528924,0.927937131645107,0.946057513178348];
+
+figure(1)
+set(gcf,'Color',[1 1 1])
+bar([Y_atpm0;Y_atpm2;Y_atpm4;Y_a2g1]);
+legend({'Opt1';'Opt2';'Opt3';'Opt4';'Mix'},'Location','NorthEast');
+set(gca,'XTick',[1 2 3 4],'XTickLabel',{'ATPM0';'ATPM2';'ATPM4';'A2G1'},'FontSize',16,'YLim',[0.9 1.25])
+grid on
+ylabel('Itaconate yield on glucose [mol/mol]');
+%%
+X = [[solRef.x;0;0;0] solM.x [solOpt.x;0;0;0] [solPK.x;0] solACK.x solOpt2.x];
